@@ -1,0 +1,588 @@
+"use client";
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Checkbox } from "@/components/ui/checkbox";
+import { AlertTriangle, Clock3, HeartPulse, Siren, Zap, Activity, Skull, Download, Trash2, Play, Pause, RotateCcw, Smartphone, QrCode } from "lucide-react";
+
+function pad(n: number) {
+  return n.toString().padStart(2, "0");
+}
+
+function formatDateTimeLocal(date: Date) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function formatClock(date: Date) {
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function formatFull(date: Date) {
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} ${formatClock(date)}`;
+}
+
+function formatDuration(seconds: number) {
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${pad(mins)}:${pad(secs)}`;
+}
+
+function getCycleNumber(elapsedSeconds: number) {
+  return Math.floor(elapsedSeconds / 120) + 1;
+}
+
+type EventType =
+  | "analyse"
+  | "adrénaline"
+  | "amiodarone"
+  | "choc"
+  | "ROSC"
+  | "décès"
+  | "note";
+
+type LogEvent = {
+  id: string;
+  type: EventType;
+  label: string;
+  timestamp: string;
+  elapsedSec: number;
+  notes?: string;
+};
+
+type Phase = "idle" | "cycle" | "analyse" | "ended";
+type AcrDelay = "superieur10" | "inferieur10" | "temoin" | null;
+
+const eventStyles: Record<EventType, string> = {
+  analyse: "bg-blue-100 text-blue-800 border-blue-200",
+  "adrénaline": "bg-red-100 text-red-800 border-red-200",
+  amiodarone: "bg-amber-100 text-amber-800 border-amber-200",
+  choc: "bg-violet-100 text-violet-800 border-violet-200",
+  ROSC: "bg-emerald-100 text-emerald-800 border-emerald-200",
+  "décès": "bg-slate-200 text-slate-800 border-slate-300",
+  note: "bg-zinc-100 text-zinc-800 border-zinc-200",
+};
+
+export default function TimeKeeperArretCardiaque() {
+  const [now, setNow] = useState(new Date());
+  const [arrestTime, setArrestTime] = useState(formatDateTimeLocal(new Date()));
+  const [isRunning, setIsRunning] = useState(false);
+  const [elapsedSec, setElapsedSec] = useState(0);
+  const [logs, setLogs] = useState<LogEvent[]>([]);
+  const [lastAlarmMinute, setLastAlarmMinute] = useState<number | null>(null);
+  const [rhythmChecked, setRhythmChecked] = useState(false);
+  const [note, setNote] = useState("");
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [cycleNumber, setCycleNumber] = useState(1);
+  const [acrDelay, setAcrDelay] = useState<AcrDelay>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+
+  useEffect(() => {
+    const interval = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (!isRunning) return;
+    const interval = setInterval(() => {
+      setElapsedSec((prev) => prev + 1);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isRunning]);
+
+  const playAlarm = () => {
+    try {
+      if (typeof window === "undefined") return;
+
+      if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+        navigator.vibrate([250, 120, 250]);
+      }
+
+      const AudioContextClass =
+        (window as any).AudioContext ||
+        (window as any).webkitAudioContext ||
+        null;
+
+      if (!AudioContextClass) {
+        setTimeout(() => {
+          window.alert(`⏰ Fin du cycle ${cycleNumber} : lancer l'analyse ${cycleNumber}.`);
+        }, 100);
+        return;
+      }
+
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new AudioContextClass();
+      }
+
+      const ctx = audioCtxRef.current;
+      if (ctx.state === "suspended") {
+        ctx.resume().catch(() => undefined);
+      }
+
+      const startAt = ctx.currentTime + 0.02;
+      [880, 660, 880].forEach((freq: number, index: number) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(freq, startAt + index * 0.22);
+        gain.gain.setValueAtTime(0.0001, startAt + index * 0.22);
+        gain.gain.exponentialRampToValueAtTime(0.12, startAt + index * 0.22 + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, startAt + index * 0.22 + 0.16);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(startAt + index * 0.22);
+        osc.stop(startAt + index * 0.22 + 0.18);
+      });
+
+      setTimeout(() => {
+        window.alert(`⏰ Fin du cycle ${cycleNumber} : lancer l'analyse ${cycleNumber}.`);
+      }, 150);
+    } catch (error) {
+      console.error("Alarm error", error);
+      try {
+        window.alert(`⏰ Fin du cycle ${cycleNumber} : lancer l'analyse ${cycleNumber}.`);
+      } catch {
+        // no-op
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!isRunning || elapsedSec === 0 || phase !== "cycle") return;
+    const currentMinute = Math.floor(elapsedSec / 60);
+    if (elapsedSec % 120 === 0 && currentMinute !== lastAlarmMinute) {
+      setLastAlarmMinute(currentMinute);
+      setRhythmChecked(false);
+      setIsRunning(false);
+      setPhase("analyse");
+      addLog("analyse", `Analyse ${cycleNumber} en cours`);
+      playAlarm();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [elapsedSec, isRunning, phase, cycleNumber]);
+
+  const addLog = (type: EventType, label: string, notes?: string) => {
+    const event: LogEvent = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      type,
+      label,
+      timestamp: formatFull(new Date()),
+      elapsedSec,
+      notes,
+    };
+    setLogs((prev) => [event, ...prev]);
+  };
+
+  const startChrono = () => {
+    const arrestDate = new Date(arrestTime);
+    const nowDate = new Date();
+    const initial = Math.max(0, Math.floor((nowDate.getTime() - arrestDate.getTime()) / 1000));
+    setElapsedSec(initial);
+    setLogs([]);
+    setRhythmChecked(false);
+    setLastAlarmMinute(null);
+    setCycleNumber(getCycleNumber(initial));
+    setPhase("cycle");
+    setIsRunning(true);
+    addLog("note", "Début du suivi Time Keeper - début du low flow");
+  };
+
+  const pauseChrono = () => setIsRunning(false);
+
+  const resumeChrono = () => setIsRunning(true);
+
+  const launchNextCycle = () => {
+    addLog("analyse", `Analyse ${cycleNumber} validée`);
+    setRhythmChecked(true);
+    setCycleNumber((prev) => prev + 1);
+    setPhase("cycle");
+    setLastAlarmMinute(Math.floor(elapsedSec / 60));
+    setIsRunning(true);
+  };
+
+  const resetAll = () => {
+    setIsRunning(false);
+    setElapsedSec(0);
+    setLogs([]);
+    setRhythmChecked(false);
+    setLastAlarmMinute(null);
+    setNote("");
+    setPhase("idle");
+    setCycleNumber(1);
+    setAcrDelay(null);
+    setArrestTime(formatDateTimeLocal(new Date()));
+  };
+
+  const exportCsv = () => {
+    const header = ["Type", "Libellé", "Horodatage", "Temps écoulé", "Notes"];
+    const rows = logs
+      .slice()
+      .reverse()
+      .map((log) => [log.type, log.label, log.timestamp, formatDuration(log.elapsedSec), log.notes || ""]);
+    const csv = [header, ...rows]
+      .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(";"))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `time_keeper_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const counts = useMemo(() => ({
+    analyses: logs.filter((l) => l.type === "analyse").length,
+    adrenaline: logs.filter((l) => l.type === "adrénaline").length,
+    amiodarone: logs.filter((l) => l.type === "amiodarone").length,
+    chocs: logs.filter((l) => l.type === "choc").length,
+  }), [logs]);
+
+  const nextAlarmSec = phase === "cycle" ? (120 - (elapsedSec % 120 || 120) === 120 ? 0 : 120 - (elapsedSec % 120)) : 0;
+  const phaseLabel =
+    phase === "idle"
+      ? "Prêt à démarrer"
+      : phase === "cycle"
+        ? `Cycle ${cycleNumber} en cours`
+        : phase === "analyse"
+          ? `Analyse ${cycleNumber} en cours`
+          : "Suivi terminé";
+
+  const acrDelayLabel =
+    acrDelay === "superieur10"
+      ? "Supérieur à 10 min"
+      : acrDelay === "inferieur10"
+        ? "Inférieur à 10 min"
+        : acrDelay === "temoin"
+          ? "Devant témoin / maintenant"
+          : "Non renseigné";
+
+  const selectAcrDelay = (value: AcrDelay) => {
+    setAcrDelay(value);
+    if (value === "superieur10") addLog("note", "ACR : supérieur à 10 min");
+    if (value === "inferieur10") addLog("note", "ACR : inférieur à 10 min");
+    if (value === "temoin") addLog("note", "ACR : devant témoin / maintenant");
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 p-3 sm:p-4 md:p-8">
+      <div className="mx-auto max-w-md space-y-4 sm:max-w-lg md:max-w-7xl md:space-y-6">
+        <div className="flex flex-col gap-3 rounded-3xl bg-white p-4 shadow-sm ring-1 ring-slate-200 md:flex-row md:items-center md:justify-between md:p-6">
+          <div>
+            <div className="mb-2 flex items-center gap-2">
+              <HeartPulse className="h-6 w-6" />
+              <h1 className="text-2xl font-bold tracking-tight">Time Keeper – Arrêt cardiaque</h1>
+            </div>
+            <p className="text-sm text-slate-600">
+              Version smartphone pour traçabilité rapide pendant une réanimation, partageable via QR code après mise en ligne.
+            </p>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-left md:text-right">
+            <div className="text-xs uppercase tracking-wide text-slate-500">Informations</div>
+            <div className="text-sm font-semibold text-slate-800">Début du low flow</div>
+            <div className="text-lg font-semibold tabular-nums">{formatClock(new Date(arrestTime))}</div>
+            <div className="text-xs text-slate-500">{formatFull(new Date(arrestTime))}</div>
+            <div className="mt-2 text-xs text-slate-500">ACR : {acrDelayLabel}</div>
+          </div>
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr] md:gap-6">
+          <div className="space-y-6">
+            <Card className="rounded-3xl shadow-sm">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-lg">
+                  <Smartphone className="h-5 w-5" /> Paramètres et chronomètre
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-5">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="arrestTime">Heure de début du low flow</Label>
+                    <Input
+                      id="arrestTime"
+                      type="datetime-local"
+                      value={arrestTime}
+                      onChange={(e) => setArrestTime(e.target.value)}
+                      className="rounded-2xl"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-2xl border bg-slate-50 p-4">
+                      <div className="text-xs text-slate-500">Temps écoulé</div>
+                      <div className="mt-1 text-3xl font-bold tabular-nums">{formatDuration(elapsedSec)}</div>
+                    </div>
+                    <div className="rounded-2xl border bg-slate-50 p-4">
+                      <div className="text-xs text-slate-500">Phase</div>
+                      <div className="mt-1 text-sm font-semibold">{phaseLabel}</div>
+                      <div className="mt-2 text-xs text-slate-500">
+                        {phase === "cycle" ? `Fin du cycle dans ${formatDuration(nextAlarmSec)}` : phase === "analyse" ? "Cliquer pour relancer le minuteur" : ""}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="mb-3 text-sm font-semibold text-slate-800">ACR</div>
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <Button
+                      variant={acrDelay === "superieur10" ? "default" : "outline"}
+                      className="rounded-2xl justify-start"
+                      onClick={() => selectAcrDelay("superieur10")}
+                    >
+                      Supérieur à 10 min
+                    </Button>
+                    <Button
+                      variant={acrDelay === "inferieur10" ? "default" : "outline"}
+                      className="rounded-2xl justify-start"
+                      onClick={() => selectAcrDelay("inferieur10")}
+                    >
+                      Inférieur à 10 min
+                    </Button>
+                    <Button
+                      variant={acrDelay === "temoin" ? "default" : "outline"}
+                      className="rounded-2xl justify-start"
+                      onClick={() => selectAcrDelay("temoin")}
+                    >
+                      Devant témoin / maintenant
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-3">
+                  {!isRunning && elapsedSec === 0 && (
+                    <Button onClick={startChrono} className="rounded-2xl">
+                      <Play className="mr-2 h-4 w-4" /> Démarrer
+                    </Button>
+                  )}
+                  {isRunning && phase === "cycle" && (
+                    <Button variant="secondary" onClick={pauseChrono} className="rounded-2xl">
+                      <Pause className="mr-2 h-4 w-4" /> Pause
+                    </Button>
+                  )}
+                  {!isRunning && elapsedSec > 0 && phase === "cycle" && (
+                    <Button onClick={resumeChrono} className="rounded-2xl">
+                      <Play className="mr-2 h-4 w-4" /> Reprendre
+                    </Button>
+                  )}
+                  {phase === "analyse" && (
+                    <Button onClick={launchNextCycle} className="rounded-2xl">
+                      <Clock3 className="mr-2 h-4 w-4" /> Analyse {cycleNumber} en cours
+                    </Button>
+                  )}
+                  <Button variant="outline" onClick={resetAll} className="rounded-2xl">
+                    <RotateCcw className="mr-2 h-4 w-4" /> Réinitialiser
+                  </Button>
+                  <Button variant="outline" onClick={exportCsv} className="rounded-2xl">
+                    <Download className="mr-2 h-4 w-4" /> Export CSV
+                  </Button>
+                </div>
+
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                  <div className="mb-1 flex items-center gap-2 font-medium">
+                    <Siren className="h-4 w-4" /> Séquence guidée automatique
+                  </div>
+                  L'application affiche <strong>Cycle 1 en cours</strong>, stoppe automatiquement le chrono toutes les 2 minutes,
+                  puis affiche <strong>Analyse en cours</strong>. Un appui relance ensuite le cycle suivant.
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+                  <div className="mb-2 flex items-center gap-2 font-medium">
+                    <QrCode className="h-4 w-4" /> Accès par QR code
+                  </div>
+                  Une fois l'application publiée sur le web, il suffira de générer un QR code pointant vers son URL pour l'ouvrir directement sur smartphone.
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="rounded-3xl shadow-sm">
+              <CardHeader>
+                <CardTitle className="text-lg">Actions rapides horodatées</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <Tabs defaultValue="evenements" className="w-full">
+                  <TabsList className="grid w-full grid-cols-2 rounded-2xl">
+                    <TabsTrigger value="evenements" className="rounded-2xl">Événements</TabsTrigger>
+                    <TabsTrigger value="notes" className="rounded-2xl">Notes</TabsTrigger>
+                  </TabsList>
+
+                  <TabsContent value="evenements" className="mt-4 space-y-4">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <Button variant="outline" className="h-auto justify-start rounded-2xl p-4" onClick={() => addLog("adrénaline", "Administration d’adrénaline")}>
+                        <div className="flex items-center gap-3 text-left">
+                          <HeartPulse className="h-5 w-5 text-red-500" />
+                          <div>
+                            <div className="font-semibold">Adrénaline</div>
+                            <div className="text-xs text-slate-500">Horodater l’administration</div>
+                          </div>
+                        </div>
+                      </Button>
+
+                      <Button variant="outline" className="h-auto justify-start rounded-2xl p-4" onClick={() => addLog("amiodarone", "Administration d’amiodarone")}>
+                        <div className="flex items-center gap-3 text-left">
+                          <Activity className="h-5 w-5 text-violet-500" />
+                          <div>
+                            <div className="font-semibold">Amiodarone</div>
+                            <div className="text-xs text-slate-500">Horodater l’administration</div>
+                          </div>
+                        </div>
+                      </Button>
+
+                      <Button variant="outline" className="h-auto justify-start rounded-2xl p-4" onClick={() => addLog("choc", "Choc électrique délivré")}>
+                        <div className="flex items-center gap-3 text-left">
+                          <Zap className="h-5 w-5 text-orange-500" />
+                          <div>
+                            <div className="font-semibold">Choc électrique</div>
+                            <div className="text-xs text-slate-500">Horodater le choc</div>
+                          </div>
+                        </div>
+                      </Button>
+
+                      <Button variant="outline" className="h-auto justify-start rounded-2xl p-4" onClick={() => addLog("analyse", "Analyse de rythme réalisée")}>
+                        <div className="flex items-center gap-3 text-left">
+                          <Clock3 className="h-5 w-5 text-blue-500" />
+                          <div>
+                            <div className="font-semibold">Analyse de rythme</div>
+                            <div className="text-xs text-slate-500">Horodater l’analyse</div>
+                          </div>
+                        </div>
+                      </Button>
+
+                      <Button variant="outline" className="h-auto justify-start rounded-2xl p-4" onClick={() => addLog("ROSC", "Récupération d’un rythme / ROSC") }>
+                        <div className="flex items-center gap-3 text-left">
+                          <HeartPulse className="h-5 w-5 text-green-500" />
+                          <div>
+                            <div className="font-semibold">ROSC</div>
+                            <div className="text-xs text-slate-500">Retour d’une circulation spontanée</div>
+                          </div>
+                        </div>
+                      </Button>
+
+                      <Button variant="outline" className="h-auto justify-start rounded-2xl p-4" onClick={() => addLog("décès", "Décès constaté") }>
+                        <div className="flex items-center gap-3 text-left">
+                          <Skull className="h-5 w-5 text-gray-800" />
+                          <div>
+                            <div className="font-semibold">Décès</div>
+                            <div className="text-xs text-slate-500">Horodater la constatation</div>
+                          </div>
+                        </div>
+                      </Button>
+                    </div>
+
+                    <div className="flex items-center space-x-3 rounded-2xl border bg-slate-50 p-4">
+                      <Checkbox checked={rhythmChecked} onCheckedChange={(v) => setRhythmChecked(Boolean(v))} id="rhythm-check" />
+                      <div className="grid gap-1.5 leading-none">
+                        <Label htmlFor="rhythm-check" className="font-medium">Analyse de rythme effectuée pour le cycle en cours</Label>
+                        <p className="text-sm text-slate-500">Cette case est décochée automatiquement à chaque rappel des 2 minutes.</p>
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="notes" className="mt-4 space-y-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="note">Ajouter une note libre</Label>
+                      <Input
+                        id="note"
+                        value={note}
+                        onChange={(e) => setNote(e.target.value)}
+                        placeholder="Ex. intubation réalisée, changement d’opérateur, capno..."
+                        className="rounded-2xl"
+                      />
+                    </div>
+                    <Button
+                      onClick={() => {
+                        if (!note.trim()) return;
+                        addLog("note", "Note libre", note.trim());
+                        setNote("");
+                      }}
+                      className="rounded-2xl"
+                    >
+                      Ajouter la note
+                    </Button>
+                  </TabsContent>
+                </Tabs>
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="space-y-6">
+            <Card className="rounded-3xl shadow-sm">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-lg">
+                  <AlertTriangle className="h-5 w-5" /> Synthèse rapide
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-2xl border bg-slate-50 p-4">
+                    <div className="text-xs text-slate-500">Analyses</div>
+                    <div className="text-2xl font-bold">{counts.analyses}</div>
+                  </div>
+                  <div className="rounded-2xl border bg-slate-50 p-4">
+                    <div className="text-xs text-slate-500">Adrénaline</div>
+                    <div className="text-2xl font-bold">{counts.adrenaline}</div>
+                  </div>
+                  <div className="rounded-2xl border bg-slate-50 p-4">
+                    <div className="text-xs text-slate-500">Amiodarone</div>
+                    <div className="text-2xl font-bold">{counts.amiodarone}</div>
+                  </div>
+                  <div className="rounded-2xl border bg-slate-50 p-4">
+                    <div className="text-xs text-slate-500">Chocs</div>
+                    <div className="text-2xl font-bold">{counts.chocs}</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="rounded-3xl shadow-sm">
+              <CardHeader>
+                <div className="flex items-center justify-between gap-3">
+                  <CardTitle className="text-lg">Journal horodaté</CardTitle>
+                  {logs.length > 0 && (
+                    <Button variant="ghost" size="sm" onClick={() => setLogs([])} className="rounded-2xl">
+                      <Trash2 className="mr-2 h-4 w-4" /> Vider
+                    </Button>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent>
+                <ScrollArea className="h-[420px] md:h-[560px] pr-3">
+                  <div className="space-y-3">
+                    {logs.length === 0 ? (
+                      <div className="rounded-2xl border border-dashed p-6 text-center text-sm text-slate-500">
+                        Aucun événement enregistré pour le moment.
+                      </div>
+                    ) : (
+                      logs.map((log) => (
+                        <div key={log.id} className="rounded-2xl border bg-white p-4 shadow-sm">
+                          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                            <Badge variant="outline" className={`rounded-full border ${eventStyles[log.type]}`}>
+                              {log.label}
+                            </Badge>
+                            <Badge variant="secondary" className="rounded-full tabular-nums">
+                              T+ {formatDuration(log.elapsedSec)}
+                            </Badge>
+                          </div>
+                          <div className="text-sm font-medium text-slate-800">{log.timestamp}</div>
+                          {log.notes && <div className="mt-2 text-sm text-slate-600">{log.notes}</div>}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </ScrollArea>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+
+        <div className="rounded-3xl border border-slate-200 bg-white p-4 text-xs text-slate-500 shadow-sm">
+          Prototype d’interface destiné à la traçabilité temporelle. À valider cliniquement, ergonomiquement et réglementairement avant tout usage réel.
+        </div>
+      </div>
+    </div>
+  );
+}
